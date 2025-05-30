@@ -19,63 +19,42 @@ void listen_multicast(int sock) {
 
     while (true) {
         memset(buffer, 0, BUFFER_SIZE);
-        recvfrom(sock, buffer, BUFFER_SIZE, 0, 
-                (sockaddr*)&sender_addr, &addr_len);
+        ssize_t recv_len = recvfrom(sock, buffer, BUFFER_SIZE, 0, 
+                                   (sockaddr*)&sender_addr, &addr_len);
+        
+        if (recv_len <= 0) continue;
 
-        if (strcmp(buffer, "HEARTBEAT") == 0) {
-            char client_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &sender_addr.sin_addr, 
-                     client_ip, INET_ADDRSTRLEN);
-            std::cout << "Received a multicast" << std::endl;
-            sockaddr_in response_addr{};
-            response_addr.sin_family = AF_INET;
-            response_addr.sin_port = htons(RESPONSE_PORT);
-            inet_pton(AF_INET, client_ip, &response_addr.sin_addr);
+        if (strcmp(buffer, "SYSINFO_REQUEST") == 0) {
+            std::cout << "Received request from server" << std::endl;
+            char server_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &sender_addr.sin_addr, server_ip, INET_ADDRSTRLEN);
+            
+            utsname sys_info{};
+            if (uname(&sys_info)) {
+                std::cerr << "Failed to get system info" << std::endl;
+                continue;
+            }
 
             char hostname[256];
             gethostname(hostname, sizeof(hostname));
-            std::string msg = "HEARTBEAT_RESPONSE " + std::string(hostname);
-            sendto(sock, msg.c_str(), msg.size(), 0, 
-                  (sockaddr*)&response_addr, sizeof(response_addr));
-            std::cout << "Sent a response to the server" << std::endl;
-        }
-    }
-}
-
-void process_requests(int sock) {
-    char buffer[BUFFER_SIZE];
-    sockaddr_in sender_addr{};
-    socklen_t addr_len = sizeof(sender_addr);
-
-    while (true) {
-        memset(buffer, 0, BUFFER_SIZE);
-        recvfrom(sock, buffer, BUFFER_SIZE, 0, 
-                (sockaddr*)&sender_addr, &addr_len);
-
-        if (strcmp(buffer, "SYSINFO_REQUEST") == 0) {
-            char client_ip[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &sender_addr.sin_addr, 
-                     client_ip, INET_ADDRSTRLEN);
-            std::cout << "Received a sysinfo request" << std::endl;
-            utsname sys_info{};
-            uname(&sys_info);
             std::string info = std::string(sys_info.sysname) + " " +
                               std::string(sys_info.release) + " " +
                               std::string(sys_info.machine);
 
-            char hostname[256];
-            gethostname(hostname, sizeof(hostname));
             std::string msg = "SYSINFO_RESPONSE " + 
                              std::string(hostname) + " " + info;
-            
+
             sockaddr_in response_addr{};
             response_addr.sin_family = AF_INET;
             response_addr.sin_port = htons(RESPONSE_PORT);
-            inet_pton(AF_INET, client_ip, &response_addr.sin_addr);
+            inet_pton(AF_INET, server_ip, &response_addr.sin_addr);
 
-            sendto(sock, msg.c_str(), msg.size(), 0, 
-                  (sockaddr*)&response_addr, sizeof(response_addr));
-            std::cout << "Sent a sysinfo response" << std::endl;
+            if (sendto(sock, msg.c_str(), msg.size(), 0, 
+                      (sockaddr*)&response_addr, sizeof(response_addr)) < 0) {
+                std::cerr << "Failed to send sysinfo" << std::endl;
+            } else {
+                std::cout << "Sent system info to server" << std::endl;
+            }
         }
     }
 }
@@ -87,42 +66,36 @@ int main() {
         return 1;
     }
 
-    // Настройка multicast
     ip_mreq mreq{};
     inet_pton(AF_INET, MULTICAST_GROUP, &mreq.imr_multiaddr);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
-              &mreq, sizeof(mreq));
+    
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq))) {
+        perror("multicast join");
+        close(sock);
+        return 1;
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     
-    if (bind(sock, (sockaddr*)&addr, sizeof(addr))){
+    if (bind(sock, (sockaddr*)&addr, sizeof(addr))) {
         perror("bind");
-        return 1;
-    }
-
-    // Второй сокет для обработки запросов
-    int cmd_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    sockaddr_in cmd_addr{};
-    cmd_addr.sin_family = AF_INET;
-    cmd_addr.sin_port = htons(RESPONSE_PORT);
-    cmd_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    
-    if (bind(cmd_sock, (sockaddr*)&cmd_addr, sizeof(cmd_addr))) {
-        perror("bind cmd");
+        close(sock);
         return 1;
     }
 
     std::thread multicast_thread(listen_multicast, sock);
-    std::thread request_thread(process_requests, cmd_sock);
 
-    multicast_thread.join();
-    request_thread.join();
-
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    std::cout << "Client started. Hostname: " << hostname << std::endl;
+    std::cout << "Press Enter to exit..." << std::endl;
+    
+    std::cin.get();
+    
     close(sock);
-    close(cmd_sock);
     return 0;
 }
